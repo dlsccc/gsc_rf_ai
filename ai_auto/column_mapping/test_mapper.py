@@ -27,8 +27,8 @@ def test_auto_map_uses_llm_when_json_is_valid():
 
     result = auto_map_fields(model_fields=model_fields, source_fields=source_fields, llm_chat_fn=fake_llm)
 
-    assert result.fallback_applied is False
-    assert result.mappings == {
+    assert result["fallbackApplied"] is False
+    assert result["mappings"] == {
         "imsi": ["table_a.imsi"],
         "location": ["table_a.lng", "table_a.lat"],
     }
@@ -43,9 +43,9 @@ def test_auto_map_fallback_when_llm_returns_invalid_json():
 
     result = auto_map_fields(model_fields=model_fields, source_fields=source_fields, llm_chat_fn=fake_llm)
 
-    assert result.fallback_applied is True
-    assert result.mappings == {"user_name": ["table_b.UserName"]}
-    assert "llm_error" in result.fallback_reason
+    assert result["fallbackApplied"] is True
+    assert result["mappings"] == {"user_name": ["table_b.UserName"]}
+    assert "llm_failed" in result["fallbackReason"]
 
 
 def test_auto_map_sanitizes_hallucinated_targets_and_sources():
@@ -68,7 +68,7 @@ def test_auto_map_sanitizes_hallucinated_targets_and_sources():
 
     result = auto_map_fields(model_fields=model_fields, source_fields=source_fields, llm_chat_fn=fake_llm)
 
-    assert result.mappings == {"imsi": ["table_a.imsi"], "user_name": ["table_b.user_name"]}
+    assert result["mappings"] == {"imsi": ["table_a.imsi"], "user_name": ["table_b.user_name"]}
 
 
 def test_auto_map_location_uses_lon_lat_rule():
@@ -83,8 +83,8 @@ def test_auto_map_location_uses_lon_lat_rule():
 
     result = auto_map_fields(model_fields=model_fields, source_fields=source_fields, llm_chat_fn=fake_llm)
 
-    assert result.fallback_applied is True
-    assert result.mappings == {"location": ["table_a.lng", "table_a.lat"]}
+    assert result["fallbackApplied"] is True
+    assert result["mappings"] == {"location": ["table_a.lng", "table_a.lat"]}
 
 
 def test_auto_map_same_name_uses_field_key_for_duplicate_names():
@@ -99,5 +99,4 @@ def test_auto_map_same_name_uses_field_key_for_duplicate_names():
 
     result = auto_map_fields(model_fields=model_fields, source_fields=source_fields, llm_chat_fn=fake_llm)
 
-    assert result.mappings == {"user_name": ["table_b.user_name"]}
-
+    assert result["mappings"] == {"user_name": ["table_b.user_name"]}

@@ -8,10 +8,7 @@ from psf.psflogging.psf_log import PsfLog
 from constants import response_constants
 from service.data_smart import data_smart_service
 from utils.log_utils import LogUtils
-try:
-    from mapper import auto_map_fields as run_auto_map_fields
-except ImportError:  # pragma: no cover
-    from column_mapping.mapper import auto_map_fields as run_auto_map_fields
+import data_mapping_service
 
 logger = LogUtils.get_logger(__name__)
 bp = Blueprint('data_smart', __name__)
@@ -38,22 +35,6 @@ def debug_sql():
         return response_constants.FAILED
 
 
-def _normalize_request_json():
-    data = request.get_json(silent=True)
-    return data if isinstance(data, dict) else {}
-
-
-def _build_auto_map_result(auto_map_result):
-    result = {
-        "mappings": auto_map_result.mappings
-    }
-    if auto_map_result.fallback_applied:
-        result["fallbackApplied"] = True
-        if auto_map_result.fallback_reason:
-            result["fallbackReason"] = auto_map_result.fallback_reason
-    return result
-
-
 @bp.route("/itsc/lingluoservice/dataSmart/autoMapFields", methods=['POST'])
 @psf_log(object_type="data", operation_name="autoMapFields", module_name="data_smart",
          param_name_list=["modelFields", "sourceFields"])
@@ -65,17 +46,15 @@ def auto_map_fields():
     :return: 字段映射关系（支持一对多）
     """
     try:
-        data = _normalize_request_json()
-        model_fields = data.get("modelFields", [])
-        source_fields = data.get("sourceFields", [])
+        data = request.get_json(silent=True)
+        data = data if isinstance(data, dict) else {}
 
         logger.info(
-            f"auto_map_fields enter, modelFields size: {len(model_fields)}, "
-            f"sourceFields size: {len(source_fields)}"
+            f"auto_map_fields enter, modelFields size: {len(data.get('modelFields', []))}, "
+            f"sourceFields size: {len(data.get('sourceFields', []))}"
         )
 
-        auto_map_result = run_auto_map_fields(model_fields=model_fields, source_fields=source_fields)
-        result = _build_auto_map_result(auto_map_result)
+        result = data_mapping_service.execute_auto_map_fields(data)
 
         logger.info(
             f"auto_map_fields success, mapping size: {len(result.get('mappings', {}))}, "
