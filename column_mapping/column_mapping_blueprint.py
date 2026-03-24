@@ -35,7 +35,7 @@ def debug_sql():
         return response_constants.FAILED
 
 
-@bp.route("/itsc/lingluoservice/dataSmart/autoMapFields", methods=['POST'])
+@bp.route("/v1/dataSmart/autoMapFields", methods=['POST'])
 @psf_log(object_type="data", operation_name="autoMapFields", module_name="data_smart",
          param_name_list=["modelFields", "sourceFields"])
 def auto_map_fields():
