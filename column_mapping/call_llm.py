@@ -1,154 +1,136 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python
+# coding=utf-8
+#  Copyright (c) Huawei Technologies Co., Ltd. 2020-2026. All rights reserved.
 """Minimal LLM client for field auto mapping."""
 
 import json
-import time
+from urllib import request
 
-import requests
-import urllib3
+from service.llm_service.llm_factory import LlmFactory
+from utils.log_utils import LogUtils
 
-urllib3.disable_warnings()
+logger = LogUtils.get_logger('data_smart_call_llm')
 
-TOKEN_URLS = {
-    "beta": {
-        "manas": "https://gzmirror-beta.manas.huawei.com/apigovernance/api/oauth/tokenByAkSk",
-        "dynamic": "https://gzmirror-beta.manas.huawei.com/api/runtime/appToken/getRestAppDynamicToken",
-    },
-    "prod": {
-        "manas": "https://gzmirror.manas.huawei.com/apigovernance/api/oauth/tokenByAkSk",
-        "dynamic": "https://gzmirror.manas.huawei.com/api/runtime/appToken/getRestAppDynamicToken",
-    },
-}
+DEFAULT_MODEL = "qwen-s-pro"
 
-# Keep hardcoded by current project requirement.
-TOKEN_CREDENTIALS = {
-    "beta": {"app_key": "get-his-token", "app_secret": "MK8JDz5lwUQMMLAoDC2sqaGdThKZwHizGe3i14eh"},
-    "prod": {"app_key": "get-his-token", "app_secret": "B10U5a0DsEqZX33sD7PApyZgI14EBwel8ZuTo8xu"},
-}
-
-MODEL_URL = "https://console.his.huawei.com/agi/agi_agent/infer/v1/chat/completions"
-DEFAULT_ENV = "prod"
-DEFAULT_APP_ID = "com.huawei.gtsfi.costline"
-DEFAULT_MODEL = "GLM-V4.7"
+# System prompt for field mapping task (defined before use)
+SYSTEM_PROMPT = """你是数据工程字段映射助手。你的任务是把"目标字段(modelFields)"映射到"源字段(sourceFields)"，输出严格JSON。
+必须遵守：
+1) 只能使用提供的字段，不得臆造字段名或key。
+2) 输出格式必须是：{"mappings":{"<targetFieldName>":["<sourceFieldKey>", ...]}}
+3) value 是数组，可一对多；无匹配可不返回该target。
+4) 优先考虑：字段名语义 > 类型兼容 > 样例值语义。
+5) 若不确定，宁可不映射，不要猜测。
+6) 只输出JSON，不要Markdown，不要解释文字。"""
 
 
-def _to_json_obj(response, error_prefix):
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise RuntimeError(f"{error_prefix}: response is not valid json") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"{error_prefix}: response json must be object")
-    return payload
+def chat_completion(messages, model=DEFAULT_MODEL, lang="zh-CN", is_risk_control=False, timeout=30):
+    """
+    Call LLM to get chat completion.
 
+    Args:
+        messages: List of message dicts with 'role' and 'content'
+        model: Model name to use (default: qwen-s-pro)
+        lang: Language setting
+        is_risk_control: Whether to enable risk control (not used in this implementation)
+        timeout: Request timeout (not used directly, handled by RPC service)
 
-def get_dynamics_token(env=DEFAULT_ENV, appid=DEFAULT_APP_ID, timeout=15):
-    if env not in TOKEN_URLS:
-        raise ValueError(f"unsupported env: {env}")
-
-    token_urls = TOKEN_URLS[env]
-    credentials = TOKEN_CREDENTIALS[env]
-
-    try:
-        manas_resp = requests.post(
-            token_urls["manas"],
-            json=credentials,
-            verify=False,
-            timeout=timeout,
-        )
-        manas_resp.raise_for_status()
-        manas_payload = _to_json_obj(manas_resp, "manas token request failed")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"manas token request failed: {exc}") from exc
-
-    access_token = manas_payload.get("AccessToken")
-    if not access_token:
-        raise RuntimeError("manas token request failed: missing AccessToken")
-
-    headers = {"AccessToken": access_token, "Content-Type": "application/json"}
-    try:
-        dynamic_resp = requests.post(
-            token_urls["dynamic"],
-            headers=headers,
-            json={"appid": appid},
-            verify=False,
-            timeout=timeout,
-        )
-        dynamic_resp.raise_for_status()
-        dynamic_payload = _to_json_obj(dynamic_resp, "dynamic token request failed")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"dynamic token request failed: {exc}") from exc
-
-    token = dynamic_payload.get("result")
-    if not token:
-        raise RuntimeError("dynamic token request failed: missing result token")
-    return str(token)
-
-
-def _extract_content(payload):
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise RuntimeError("model response missing choices")
-
-    first = choices[0] if isinstance(choices[0], dict) else {}
-    message = first.get("message") if isinstance(first.get("message"), dict) else {}
-    content = message.get("content")
-
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        text_list = []
-        for item in content:
-            if isinstance(item, dict) and isinstance(item.get("text"), str):
-                text_list.append(item["text"])
-        if text_list:
-            return "".join(text_list)
-    raise RuntimeError("model response missing message.content")
-
-
-def chat_completion(
-    messages,
-    model=DEFAULT_MODEL,
-    env=DEFAULT_ENV,
-    appid=DEFAULT_APP_ID,
-    timeout=30,
-    max_retries=1,
-):
+    Returns:
+        str: The text content from LLM response
+    """
     if not isinstance(messages, list) or not messages:
         raise ValueError("messages must be a non-empty list")
 
-    body = {
-        "messages": messages,
-        "model": model,
-        "stream": False,
-        "chat_template_kwargs": {"enable_thinking": False},
+    # Convert messages to prompt format expected by LLM
+    # System message + user message concatenation
+    logger.info(f"chat_completion: received {len(messages)} messages")
+    logger.info(f"chat_completion: messages = {messages}")
+
+    prompt_parts = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "system":
+            prompt_parts.append(f"[System]\n{content}")
+        else:
+            prompt_parts.append(content)
+
+    prompt = "\n".join(prompt_parts)
+    logger.info(f"chat_completion: prompt = {prompt[:100]}...")
+
+    model_use = LlmFactory.get_model(model_name=model)
+    result = model_use.send_request(prompt=prompt)
+    return result if isinstance(result, str) else str(result)
+
+
+def build_messages(model_fields, source_fields):
+    """
+    Build messages for field mapping task.
+
+    Args:
+        model_fields: List of target model field definitions
+        source_fields: List of source field definitions
+
+    Returns:
+        list: Messages ready for LLM chat completion
+    """
+    payload = {
+        "task": "map_fields",
+        "modelFields": model_fields,
+        "sourceFields": source_fields
     }
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
 
-    attempts = max(1, int(max_retries) + 1)
-    last_error = None
 
-    for attempt in range(attempts):
+def extract_json_dict(text):
+    """
+    Extract JSON object from LLM response text.
+
+    Args:
+        text: Raw LLM response text
+
+    Returns:
+        dict: Parsed JSON object
+    """
+    text = str(text).strip()
+    if not text:
+        raise RuntimeError("llm response is empty")
+
+    # Remove markdown code blocks if present
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 3:
+            text = parts[1]
+            if text.lower().startswith("json"):
+                text = text[4:]
+            text = text.strip()
+
+    # Try to find and extract JSON object
+    start = text.find("{")
+    end = text.rfind("}")
+
+    if start != -1 and end != -1 and end > start:
+        # Found a potential JSON object
         try:
-            headers = {
-                "content-type": "application/json",
-                "Authorization": get_dynamics_token(env=env, appid=appid, timeout=timeout),
-            }
-            response = requests.post(
-                MODEL_URL,
-                headers=headers,
-                data=json.dumps(body, ensure_ascii=False),
-                verify=False,
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            payload = _to_json_obj(response, "model request failed")
-            return _extract_content(payload)
-        except (requests.RequestException, RuntimeError, ValueError) as exc:
-            last_error = exc
-            if attempt + 1 < attempts:
-                time.sleep(0.4 * (attempt + 1))
-                continue
+            payload = json.loads(text[start: end + 1])
+            if not isinstance(payload, dict):
+                raise RuntimeError("llm response json must be object")
+            return payload
+        except json.JSONDecodeError:
+            # Not valid JSON, fall through to error
+            pass
 
-    raise RuntimeError(f"model request failed: {last_error}")
+    # If we get here, no valid JSON object was found
+    # Try to parse the whole text as JSON (handles array cases)
+    try:
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise RuntimeError("llm response json must be object")
+        return payload
+    except json.JSONDecodeError:
+        pass
 
+    raise RuntimeError("llm response does not contain a json object")

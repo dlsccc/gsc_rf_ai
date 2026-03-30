@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python
+# coding=utf-8
+#  Copyright (c) Huawei Technologies Co., Ltd. 2020-2026. All rights reserved.
 """Service layer for auto field mapping."""
 
-from mapper import auto_map_fields as run_auto_map_fields
+from .mapper  import auto_map_fields as run_auto_map_fields
 
 
 def _ensure_dict(data):

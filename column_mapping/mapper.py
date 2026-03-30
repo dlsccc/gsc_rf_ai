@@ -1,24 +1,15 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python
+# coding=utf-8
+#  Copyright (c) Huawei Technologies Co., Ltd. 2020-2026. All rights reserved.
 """Field mapping: try LLM first, fallback to rule matching."""
 
-import json
 import re
 
-try:
-    from .call_llm import chat_completion
-except ImportError:  # pragma: no cover
-    from call_llm import chat_completion
+from .call_llm import chat_completion, build_messages, extract_json_dict
+from utils.log_utils import LogUtils
 
+logger = LogUtils.get_logger('mapper')
 
-SYSTEM_PROMPT = """你是数据工程字段映射助手。你的任务是把“目标字段(modelFields)”映射到“源字段(sourceFields)”，输出严格JSON。
-必须遵守：
-1) 只能使用提供的字段，不得臆造字段名或key。
-2) 输出格式必须是：{"mappings":{"<targetFieldName>":["<sourceFieldKey>", ...]}}
-3) value 是数组，可一对多；无匹配可不返回该target。
-4) 优先考虑：字段名语义 > 类型兼容 > 样例值语义。
-5) 若不确定，宁可不映射，不要猜测。
-6) 只输出JSON，不要Markdown，不要解释文字。"""
 
 LOCATION_TARGET_KEYWORDS = ("location", "coordinate", "position", "geo", "坐标", "经纬", "位置")
 LNG_CANDIDATES = {"lng", "lon", "longitude", "long", "经度"}
@@ -97,38 +88,6 @@ def _clean_source_fields(source_fields):
             }
         )
     return result
-
-
-def _build_messages(model_fields, source_fields):
-    payload = {"task": "map_fields", "modelFields": model_fields, "sourceFields": source_fields}
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
-
-
-def _extract_json_dict(text):
-    text = _to_text(text)
-    if not text:
-        raise RuntimeError("llm response is empty")
-
-    if text.startswith("```"):
-        parts = text.split("```")
-        if len(parts) >= 3:
-            text = parts[1]
-            if text.lower().startswith("json"):
-                text = text[4:]
-            text = text.strip()
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise RuntimeError("llm response does not contain a json object")
-
-    payload = json.loads(text[start : end + 1])
-    if not isinstance(payload, dict):
-        raise RuntimeError("llm response json must be object")
-    return payload
 
 
 def _sanitize_mappings(raw_payload, model_fields, source_fields):
@@ -225,10 +184,15 @@ def auto_map_fields(model_fields, source_fields, llm_chat_fn=None):
     llm_error = ""
     try:
         chat_fn = llm_chat_fn or chat_completion
-        llm_text = chat_fn(_build_messages(model_fields, source_fields))
-        llm_payload = _extract_json_dict(llm_text)
+        messages = build_messages(model_fields, source_fields)
+
+        llm_text = chat_fn(messages)
+
+        logger.info(f"auto_map_fields: LLM returned: {llm_text[:200] if llm_text else 'empty'}")
+        llm_payload = extract_json_dict(llm_text)
         llm_mappings = _sanitize_mappings(llm_payload, model_fields, source_fields)
     except Exception as exc:  # noqa: BLE001
+        logger.error(f"auto_map_fields: LLM call failed: {exc}")
         llm_error = f"llm_failed:{exc.__class__.__name__}"
 
     fallback_mappings = _rule_fallback(model_fields, source_fields)
@@ -261,4 +225,3 @@ def auto_map_fields(model_fields, source_fields, llm_chat_fn=None):
         "fallbackApplied": bool(llm_error),
         "fallbackReason": llm_error,
     }
-
