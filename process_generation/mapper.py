@@ -15,7 +15,6 @@ FILTER_OPERATORS = {
 }
 TIME_TRANSFORM_INPUT_TYPES = {"format_datetime", "extract_year", "extract_month", "extract_time", "format_time"}
 TRANSFORM_TYPES = {"format_datetime", "calc_week", "calc_weekday", "set_value", "concat", "replace"}
-TRANSFORM_TYPES_WITH_ALIAS = TRANSFORM_TYPES.union(TIME_TRANSFORM_INPUT_TYPES)
 
 TIME_TOKEN_PATTERN = re.compile(r"(YYYY|MM|DD|hh|mm|ss)")
 TIME_KEYWORDS = (
@@ -246,7 +245,36 @@ def _clean_dsl_definitions(dsl_definitions):
     if not required.issubset(set(dsl_definitions.keys())):
         raise ValueError("dslDefinitions must contain filter/transform/sort")
 
+    transform = dsl_definitions.get("transform")
+    if not isinstance(transform, dict):
+        raise ValueError("dslDefinitions.transform must be an object")
+
+    has_types = isinstance(transform.get("types"), list)
+    has_operator_defs = isinstance(transform.get("operators"), list)
+    if not (has_types or has_operator_defs):
+        raise ValueError("dslDefinitions.transform must contain types or operators")
+
     return dsl_definitions
+
+
+def _get_allowed_transform_types(dsl_definitions):
+    transform = dsl_definitions.get("transform")
+    if not isinstance(transform, dict):
+        return set(TRANSFORM_TYPES)
+
+    types = []
+    if isinstance(transform.get("types"), list):
+        types.extend([_to_text(item).lower() for item in transform.get("types")])
+
+    if isinstance(transform.get("operators"), list):
+        for item in transform.get("operators"):
+            if isinstance(item, dict):
+                operator_type = _to_text(item.get("type")).lower()
+                if operator_type:
+                    types.append(operator_type)
+
+    allowed = {item for item in types if item in TRANSFORM_TYPES}
+    return allowed if allowed else set(TRANSFORM_TYPES)
 
 
 def _is_numeric_text(value):
@@ -412,12 +440,17 @@ def _sanitize_filter(raw_filter):
     }
 
 
-def _sanitize_transform_step(raw_step, allow_origin_type=False, target_format=""):
+def _sanitize_transform_step(raw_step, allow_origin_type=False, target_format="", allowed_transform_types=None):
     if not isinstance(raw_step, dict):
         return None
 
+    allowed = allowed_transform_types or set(TRANSFORM_TYPES)
+    allowed_with_alias = set(allowed)
+    if "format_datetime" in allowed:
+        allowed_with_alias = allowed_with_alias.union(TIME_TRANSFORM_INPUT_TYPES)
+
     transform_type = _normalize_transform_type(raw_step.get("type"))
-    if transform_type not in TRANSFORM_TYPES_WITH_ALIAS:
+    if transform_type not in allowed_with_alias:
         return None
 
     item = {
@@ -435,12 +468,10 @@ def _sanitize_transform_step(raw_step, allow_origin_type=False, target_format=""
             return None
         item["originType"] = origin_type
 
-
-
     return item
 
 
-def _sanitize_transform(field_name, raw_transform, mappings, model_field_map):
+def _sanitize_transform(field_name, raw_transform, mappings, model_field_map, allowed_transform_types):
     if not isinstance(raw_transform, dict):
         return None
 
@@ -451,7 +482,12 @@ def _sanitize_transform(field_name, raw_transform, mappings, model_field_map):
 
     chain = raw_transform.get("chain")
     if isinstance(chain, list) and chain:
-        sanitized_chain = [item for item in (_sanitize_transform_step(step, allow_origin_type, target_format) for step in chain) if item]
+        sanitized_chain = [
+            item for item in (
+                _sanitize_transform_step(step, allow_origin_type, target_format, allowed_transform_types)
+                for step in chain
+            ) if item
+        ]
         if not sanitized_chain:
             return None
         return {"rules": [], "chain": sanitized_chain}
@@ -465,7 +501,7 @@ def _sanitize_transform(field_name, raw_transform, mappings, model_field_map):
             operator = _to_text(rule.get("operator")).lower()
             if operator not in FILTER_OPERATORS:
                 continue
-            step = _sanitize_transform_step(rule, allow_origin_type, target_format)
+            step = _sanitize_transform_step(rule, allow_origin_type, target_format, allowed_transform_types)
             if not step:
                 continue
             sanitized_rules.append({
@@ -483,7 +519,7 @@ def _sanitize_transform(field_name, raw_transform, mappings, model_field_map):
             return None
         return {"rules": sanitized_rules, "chain": []}
 
-    single = _sanitize_transform_step(raw_transform, allow_origin_type, target_format)
+    single = _sanitize_transform_step(raw_transform, allow_origin_type, target_format, allowed_transform_types)
     if not single:
         return None
 
@@ -501,13 +537,14 @@ def _sanitize_sort(raw_sort):
     return {"order": order}
 
 
-def _sanitize_suggestions(raw_payload, model_fields, mappings):
+def _sanitize_suggestions(raw_payload, model_fields, mappings, dsl_definitions):
     source = raw_payload.get("suggestions", raw_payload)
     if not isinstance(source, dict):
         return {}
 
     model_field_map = {item["fieldName"]: item for item in model_fields}
     ordered_fields = [item["fieldName"] for item in model_fields]
+    allowed_transform_types = _get_allowed_transform_types(dsl_definitions)
     cleaned = {}
 
     for field_name in ordered_fields:
@@ -521,7 +558,9 @@ def _sanitize_suggestions(raw_payload, model_fields, mappings):
 
         clean_ops = {}
         clean_filter = _sanitize_filter(operations.get("filter"))
-        clean_transform = _sanitize_transform(field_name, operations.get("transform"), mappings, model_field_map)
+        clean_transform = _sanitize_transform(
+            field_name, operations.get("transform"), mappings, model_field_map, allowed_transform_types
+        )
         clean_sort = _sanitize_sort(operations.get("sort"))
 
         if clean_filter:
@@ -543,7 +582,8 @@ def _sanitize_suggestions(raw_payload, model_fields, mappings):
     return cleaned
 
 
-def _build_fallback_suggestions(model_fields, mappings, source_data):
+def _build_fallback_suggestions(model_fields, mappings, source_data, dsl_definitions):
+    allowed_transform_types = _get_allowed_transform_types(dsl_definitions)
     result = {}
 
     for field in model_fields:
@@ -555,7 +595,7 @@ def _build_fallback_suggestions(model_fields, mappings, source_data):
         # Counter/KPI numeric cleanup fallback
         model_type = _to_text(field.get("modelType")).lower()
         business_type = _to_text(field.get("businessType")).lower()
-        if model_type in {"counter", "kpi"} or business_type == "metric":
+        if ("set_value" in allowed_transform_types) and (model_type in {"counter", "kpi"} or business_type == "metric"):
             values = _collect_values_by_target(field_name, mappings, source_data)
             abnormal_tokens = _detect_non_numeric_tokens(values)
             if abnormal_tokens:
@@ -581,7 +621,7 @@ def _build_fallback_suggestions(model_fields, mappings, source_data):
                 continue
 
         # Time formatting fallback
-        if _is_time_field(field):
+        if ("format_datetime" in allowed_transform_types) and _is_time_field(field):
             target_template = _to_text(field.get("targetFormat"))
             if not target_template:
                 continue
@@ -639,12 +679,12 @@ def generate_process_suggestions(model_detail, source_fields, source_data, mappi
         messages = build_messages(payload)
         llm_text = chat_fn(messages)
         llm_payload = extract_json_dict(llm_text)
-        llm_suggestions = _sanitize_suggestions(llm_payload, model_fields, mappings)
+        llm_suggestions = _sanitize_suggestions(llm_payload, model_fields, mappings, dsl_definitions)
     except Exception as exc:  # noqa: BLE001
         logger.error("generate_process_suggestions llm failed: {}".format(exc))
         llm_error = "llm_failed:{}".format(exc.__class__.__name__)
 
-    fallback_suggestions = _build_fallback_suggestions(model_fields, mappings, source_data)
+    fallback_suggestions = _build_fallback_suggestions(model_fields, mappings, source_data, dsl_definitions)
 
     if llm_suggestions:
         merged = {}
@@ -675,19 +715,3 @@ def generate_process_suggestions(model_detail, source_fields, source_data, mappi
         "fallbackApplied": bool(llm_error),
         "fallbackReason": llm_error
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -17,7 +17,7 @@ SYSTEM_PROMPT = """
 
 必须遵守：
 1) 只能使用输入中的 modelDetail.fieldList（以及归一化后的 modelFields）/sourceFields/mappings/sourceData，不得臆造字段。
-2) 只能使用给定 dslDefinitions 中的算子。
+2) 只能使用给定 dslDefinitions 中的算子，且 transform 参数必须遵循 dslDefinitions.transform.operators[*] 的 params/required。
 3) 严禁输出 formula 或任何未定义算子。
 4) 输出必须是严格 JSON，且只输出 JSON，不要解释。
 5) 建议按列输出，格式：
@@ -39,8 +39,9 @@ SYSTEM_PROMPT = """
    - 当 originType 与 targetFormat 不一致时，才建议使用 format_datetime。
    - format_datetime 时，必须输出 originType（源格式模板字符串：YYYY/MM/DD/hh/mm/ss + 原分隔符）；非时间字段或多源映射字段不要输出 originType。
 7) 不确定时可不返回该字段建议，不要猜测。
+8) 若某算子缺少必填参数，不要输出该算子。
 
-算子说明：
+算子说明（以 dslDefinitions 定义为准，下面仅作参考）：
 A. filter
 - simple: {"mode":"simple","operator":"equals|not_equals|contains|is_empty|is_not_empty|greater_than|less_than","value":"..."}
 - compound: {"mode":"compound","logic":"AND|OR","conditions":[{"operator":"...","value":"..."}]}
@@ -120,9 +121,3 @@ def extract_json_dict(text):
     if not isinstance(payload, dict):
         raise RuntimeError("llm response json must be object")
     return payload
-
-
-
-
-
-
