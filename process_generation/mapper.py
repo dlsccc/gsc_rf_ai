@@ -16,6 +16,8 @@ FILTER_OPERATORS = {
 TIME_TRANSFORM_INPUT_TYPES = {"format_datetime", "extract_year", "extract_month", "extract_time", "format_time"}
 TRANSFORM_TYPES = {"format_datetime", "calc_week", "calc_weekday", "set_value", "concat", "replace"}
 
+DEFAULT_MAPPING_BATCH_SIZE = 30
+
 TIME_TOKEN_PATTERN = re.compile(r"(YYYY|MM|DD|hh|mm|ss)")
 TIME_KEYWORDS = (
     "time", "date", "year", "month", "day", "week", "hour", "minute", "second",
@@ -275,6 +277,72 @@ def _get_allowed_transform_types(dsl_definitions):
 
     allowed = {item for item in types if item in TRANSFORM_TYPES}
     return allowed if allowed else set(TRANSFORM_TYPES)
+
+
+def _resolve_mapping_batch_size():
+    return DEFAULT_MAPPING_BATCH_SIZE
+
+
+
+def _chunk_by_size(items, batch_size):
+    if batch_size <= 0:
+        batch_size = DEFAULT_MAPPING_BATCH_SIZE
+    for index in range(0, len(items), batch_size):
+        yield items[index:index + batch_size]
+
+
+def _build_batch_context(batch_targets, model_fields, source_fields, source_data, mappings):
+    target_set = set(batch_targets)
+
+    batch_model_fields = [item for item in model_fields if item.get("fieldName") in target_set]
+
+    batch_mappings = {}
+    used_source_keys = set()
+    for target in batch_targets:
+        source_keys = mappings.get(target, [])
+        if not source_keys:
+            continue
+        batch_mappings[target] = source_keys
+        for source_key in source_keys:
+            used_source_keys.add(source_key)
+
+    batch_source_fields = [item for item in source_fields if item.get("fieldKey") in used_source_keys]
+
+    table_columns = {}
+    for source_key in used_source_keys:
+        table_name, column_name = _parse_source_key(source_key)
+        if not table_name or not column_name:
+            continue
+        if table_name not in table_columns:
+            table_columns[table_name] = set()
+        table_columns[table_name].add(column_name)
+
+    batch_source_data = {}
+    for table_name, columns in table_columns.items():
+        rows = source_data.get(table_name, [])
+        if not rows:
+            continue
+
+        compact_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            compact_row = {}
+            for column in columns:
+                if column in row:
+                    compact_row[column] = row.get(column)
+            if compact_row:
+                compact_rows.append(compact_row)
+
+        if compact_rows:
+            batch_source_data[table_name] = compact_rows
+
+    return {
+        "modelFields": batch_model_fields,
+        "sourceFields": batch_source_fields,
+        "sourceData": batch_source_data,
+        "mappings": batch_mappings
+    }
 
 
 def _is_numeric_text(value):
@@ -662,29 +730,64 @@ def generate_process_suggestions(model_detail, source_fields, source_data, mappi
             "fallbackReason": ""
         }
 
-    payload = {
-        "task": "generate_process_suggestions",
-        "modelDetail": model_meta,
-        "modelFields": model_fields,
-        "sourceFields": source_fields,
-        "sourceData": source_data,
-        "mappings": mappings,
-        "dslDefinitions": dsl_definitions
-    }
+    fallback_suggestions = _build_fallback_suggestions(model_fields, mappings, source_data, dsl_definitions)
+
+    mapped_targets = [item["fieldName"] for item in model_fields if mappings.get(item["fieldName"])]
+    if not mapped_targets:
+        return {
+            "suggestions": {},
+            "fallbackApplied": False,
+            "fallbackReason": ""
+        }
+
+    batch_size = _resolve_mapping_batch_size()
+    batches = list(_chunk_by_size(mapped_targets, batch_size))
+    logger.info(
+        "generate_process_suggestions batching, target_count:%s, batch_size:%s, batch_count:%s",
+        len(mapped_targets),
+        batch_size,
+        len(batches)
+    )
 
     llm_suggestions = {}
-    llm_error = ""
-    try:
-        chat_fn = llm_chat_fn or chat_completion
-        messages = build_messages(payload)
-        llm_text = chat_fn(messages)
-        llm_payload = extract_json_dict(llm_text)
-        llm_suggestions = _sanitize_suggestions(llm_payload, model_fields, mappings, dsl_definitions)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("generate_process_suggestions llm failed: {}".format(exc))
-        llm_error = "llm_failed:{}".format(exc.__class__.__name__)
+    llm_errors = []
+    chat_fn = llm_chat_fn or chat_completion
 
-    fallback_suggestions = _build_fallback_suggestions(model_fields, mappings, source_data, dsl_definitions)
+    for batch_index, batch_targets in enumerate(batches, start=1):
+        batch_context = _build_batch_context(batch_targets, model_fields, source_fields, source_data, mappings)
+        batch_model_fields = batch_context["modelFields"]
+        batch_source_fields = batch_context["sourceFields"]
+        batch_source_data = batch_context["sourceData"]
+        batch_mappings = batch_context["mappings"]
+
+        if not batch_model_fields or not batch_source_fields or not batch_mappings:
+            logger.warning("generate_process_suggestions skip batch %s due to empty context", batch_index)
+            continue
+
+        payload = {
+            "task": "generate_process_suggestions",
+            "modelDetail": model_meta,
+            "modelFields": batch_model_fields,
+            "sourceFields": batch_source_fields,
+            "sourceData": batch_source_data,
+            "mappings": batch_mappings,
+            "dslDefinitions": dsl_definitions
+        }
+
+        try:
+            messages = build_messages(payload)
+            llm_text = chat_fn(messages)
+            llm_payload = extract_json_dict(llm_text)
+            batch_suggestions = _sanitize_suggestions(llm_payload, batch_model_fields, batch_mappings, dsl_definitions)
+            for field_name, suggestion in batch_suggestions.items():
+                llm_suggestions[field_name] = suggestion
+        except Exception as exc:  # noqa: BLE001
+            logger.error("generate_process_suggestions llm failed at batch %s: %s", batch_index, exc)
+            llm_errors.append("batch{}_{}".format(batch_index, exc.__class__.__name__))
+
+    llm_error = ""
+    if llm_errors:
+        llm_error = "llm_failed:{}".format("|".join(_unique_keep_order(llm_errors)))
 
     if llm_suggestions:
         merged = {}
@@ -697,10 +800,16 @@ def generate_process_suggestions(model_detail, source_fields, source_data, mappi
                 merged[name] = fallback_suggestions[name]
                 fallback_applied = True
 
+        fallback_reason = ""
+        if fallback_applied:
+            fallback_reason = "fallback_applied:partial"
+            if llm_error:
+                fallback_reason = fallback_reason + ";" + llm_error
+
         return {
             "suggestions": merged,
             "fallbackApplied": fallback_applied,
-            "fallbackReason": "fallback_applied:partial" if fallback_applied else ""
+            "fallbackReason": fallback_reason
         }
 
     if fallback_suggestions:
