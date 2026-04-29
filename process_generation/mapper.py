@@ -1,7 +1,7 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # coding=utf-8
 #  Copyright (c) Huawei Technologies Co., Ltd. 2020-2026. All rights reserved.
-"""Generate process suggestions with LLM first, rule fallback second."""
+
 
 import re
 
@@ -16,7 +16,7 @@ FILTER_OPERATORS = {
 TIME_TRANSFORM_INPUT_TYPES = {"format_datetime", "extract_year", "extract_month", "extract_time", "format_time"}
 TRANSFORM_TYPES = {"format_datetime", "calc_week", "calc_weekday", "set_value", "concat", "replace"}
 
-DEFAULT_MAPPING_BATCH_SIZE = 30
+DEFAULT_MAPPING_BATCH_SIZE = 50
 
 TIME_TOKEN_PATTERN = re.compile(r"(YYYY|MM|DD|hh|mm|ss)")
 TIME_KEYWORDS = (
@@ -90,34 +90,65 @@ def _clean_model_fields_legacy(model_fields):
     return result
 
 
+def _clean_model_detail_list_input(model_fields):
+    """处理列表输入格式"""
+    model_fields = _clean_model_fields_legacy(model_fields)
+    return {
+        "code": "",
+        "modelName": "",
+        "businessModelType": "",
+        "involveCalc": False
+    }, model_fields
+
+
+def _clean_model_detail_legacy(model_detail):
+    """处理旧格式modelFields输入"""
+    model_fields = _clean_model_fields_legacy(model_detail.get("modelFields"))
+    return {
+        "code": _to_text(model_detail.get("code") or model_detail.get("modelCode")),
+        "modelName": _to_text(model_detail.get("modelName") or model_detail.get("name")),
+        "businessModelType": _to_text(
+            model_detail.get("businessModelType") or model_detail.get("modelType") or model_detail.get("type")
+        ).lower(),
+        "involveCalc": _to_bool(model_detail.get("involveCalc"))
+    }, model_fields
+
+
+def _build_model_field_item(item, idx, model_type, involve_calc):
+    """构建单个模型字段"""
+    field_name = _to_text(item.get("fieldName") or item.get("name"))
+    if not field_name:
+        raise ValueError("fieldList[{}].fieldName is required".format(idx))
+    return {
+        "fieldName": field_name,
+        "fieldType": _to_text(item.get("fieldType") or item.get("type")),
+        "businessDesc": _to_text(item.get("fieldDesc") or item.get("description")),
+        "sampleValue": _to_text(item.get("dataExample") or item.get("sampleValue") or item.get("example")),
+        "businessType": _to_text(item.get("fieldBusinessType") or item.get("businessType")).lower(),
+        "targetFormat": _to_text(item.get("dataFormat") or item.get("targetFormat") or item.get("format")),
+        "modelType": _to_text(item.get("modelType") or item.get("businessModelType") or model_type).lower(),
+        "involveCalc": _to_bool(item.get("involveCalc") if item.get("involveCalc") is not None else involve_calc)
+    }
+
+
 def _clean_model_detail(model_detail):
     if isinstance(model_detail, list):
-        model_fields = _clean_model_fields_legacy(model_detail)
-        return {
-            "code": "",
-            "modelName": "",
-            "businessModelType": "",
-            "involveCalc": False
-        }, model_fields
+        return _clean_model_detail_list_input(model_detail)
 
     if model_detail is None or not isinstance(model_detail, dict):
         raise ValueError("model detail must be an object")
 
     # 兼容旧入参：仍允许直接传 modelFields
     if isinstance(model_detail.get("modelFields"), list) and model_detail.get("fieldList") is None:
-        model_fields = _clean_model_fields_legacy(model_detail.get("modelFields"))
-        return {
-            "code": _to_text(model_detail.get("code") or model_detail.get("modelCode")),
-            "modelName": _to_text(model_detail.get("modelName") or model_detail.get("name")),
-            "businessModelType": _to_text(model_detail.get("businessModelType") or model_detail.get("modelType") or model_detail.get("type")).lower(),
-            "involveCalc": _to_bool(model_detail.get("involveCalc"))
-        }, model_fields
+        return _clean_model_detail_legacy(model_detail)
 
     field_list = model_detail.get("fieldList")
     if field_list is None or not isinstance(field_list, list):
         raise ValueError("fieldList must be a list")
 
-    model_type = _to_text(model_detail.get("businessModelType") or model_detail.get("modelType") or model_detail.get("type")).lower()
+    model_type = _to_text(
+        model_detail.get("businessModelType") or model_detail.get("modelType") or model_detail.get("type")
+    ).lower()
     involve_calc = _to_bool(model_detail.get("involveCalc"))
 
     model_meta = {
@@ -138,24 +169,11 @@ def _clean_model_detail(model_detail):
     for idx, item in enumerate(field_list):
         if not isinstance(item, dict):
             raise ValueError("fieldList[{}] must be an object".format(idx))
-
         field_name = _to_text(item.get("fieldName") or item.get("name"))
-        if not field_name:
-            raise ValueError("fieldList[{}].fieldName is required".format(idx))
         if field_name in seen:
             continue
         seen.add(field_name)
-
-        result.append({
-            "fieldName": field_name,
-            "fieldType": _to_text(item.get("fieldType") or item.get("type")),
-            "businessDesc": _to_text(item.get("fieldDesc") or item.get("description")),
-            "sampleValue": _to_text(item.get("dataExample") or item.get("sampleValue") or item.get("example")),
-            "businessType": _to_text(item.get("fieldBusinessType") or item.get("businessType")).lower(),
-            "targetFormat": _to_text(item.get("dataFormat") or item.get("targetFormat") or item.get("format")),
-            "modelType": _to_text(item.get("modelType") or item.get("businessModelType") or model_type).lower(),
-            "involveCalc": _to_bool(item.get("involveCalc") if item.get("involveCalc") is not None else involve_calc)
-        })
+        result.append(_build_model_field_item(item, idx, model_type, involve_calc))
 
     return model_meta, result
 
@@ -650,7 +668,55 @@ def _sanitize_suggestions(raw_payload, model_fields, mappings, dsl_definitions):
     return cleaned
 
 
+def _build_counter_kpi_fallback(field, field_name, mapped_keys, mappings, source_data, allowed_transform_types):
+    """构建counter/kpi类型字段的数值清理fallback"""
+    model_type = _to_text(field.get("modelType")).lower()
+    business_type = _to_text(field.get("businessType")).lower()
+    if not (model_type in {"counter", "kpi"} or business_type == "metric"):
+        return None
+
+    values = _collect_values_by_target(field_name, mappings, source_data)
+    abnormal_tokens = _detect_non_numeric_tokens(values)
+    if not abnormal_tokens:
+        return None
+
+    replacement = "0" if field.get("involveCalc") else ""
+    rules = [
+        {"operator": "equals", "value": token, "type": "set_value", "fixedValue": replacement}
+        for token in abnormal_tokens
+    ]
+    return {
+        "needAttention": True,
+        "hint": "检测到非数值异常值，建议先替换后再计算",
+        "operations": {"transform": {"rules": rules}}
+    }
+
+
+def _build_time_fallback(field, field_name, mapped_keys, mappings, source_data, allowed_transform_types):
+    """构建时间字段的格式化fallback"""
+    target_template = _to_text(field.get("targetFormat"))
+    if not target_template:
+        return None
+
+    origin_type = _detect_origin_type_from_mapped_source(field_name, mappings, source_data)
+    if not origin_type:
+        return None
+    if _is_same_time_template(origin_type, target_template):
+        return None
+
+    transform = {
+        "type": "format_datetime",
+        "originType": origin_type if len(mapped_keys) == 1 else ""
+    }
+    return {
+        "needAttention": True,
+        "hint": "检测到源时间格式与目标格式不一致，建议使用格式化时间",
+        "operations": {"transform": transform}
+    }
+
+
 def _build_fallback_suggestions(model_fields, mappings, source_data, dsl_definitions):
+    """构建规则建议（仅时间格式化规则）"""
     allowed_transform_types = _get_allowed_transform_types(dsl_definitions)
     result = {}
 
@@ -660,98 +726,32 @@ def _build_fallback_suggestions(model_fields, mappings, source_data, dsl_definit
         if not mapped_keys:
             continue
 
-        # Counter/KPI numeric cleanup fallback
-        model_type = _to_text(field.get("modelType")).lower()
-        business_type = _to_text(field.get("businessType")).lower()
-        if ("set_value" in allowed_transform_types) and (model_type in {"counter", "kpi"} or business_type == "metric"):
-            values = _collect_values_by_target(field_name, mappings, source_data)
-            abnormal_tokens = _detect_non_numeric_tokens(values)
-            if abnormal_tokens:
-                replacement = "0" if field.get("involveCalc") else ""
-                rules = []
-                for token in abnormal_tokens:
-                    rules.append({
-                        "operator": "equals",
-                        "value": token,
-                        "type": "set_value",
-                        "fixedValue": replacement
-                    })
-
-                result[field_name] = {
-                    "needAttention": True,
-                    "hint": "检测到非数值异常值，建议先替换后再计算",
-                    "operations": {
-                        "transform": {
-                            "rules": rules
-                        }
-                    }
-                }
-                continue
-
         # Time formatting fallback
-        if ("format_datetime" in allowed_transform_types) and _is_time_field(field):
-            target_template = _to_text(field.get("targetFormat"))
-            if not target_template:
-                continue
-
-            origin_type = _detect_origin_type_from_mapped_source(field_name, mappings, source_data)
-            if not origin_type:
-                continue
-            if _is_same_time_template(origin_type, target_template):
-                continue
-
-            transform = {
-                "type": "format_datetime",
-                "originType": origin_type if len(mapped_keys) == 1 else ""
-            }
-            hint = "检测到源时间格式与目标格式不一致，建议使用格式化时间"
-
-            result[field_name] = {
-                "needAttention": True,
-                "hint": hint,
-                "operations": {"transform": transform}
-            }
+        if "format_datetime" in allowed_transform_types and _is_time_field(field):
+            suggestion = _build_time_fallback(
+                field, field_name, mapped_keys, mappings, source_data, allowed_transform_types
+            )
+            if suggestion:
+                result[field_name] = suggestion
 
     return result
 
 
-def generate_process_suggestions(model_detail, source_fields, source_data, mappings, dsl_definitions, llm_chat_fn=None):
-    """Return dict with suggestions and fallback metadata."""
-    model_meta, model_fields = _clean_model_detail(model_detail)
-    source_fields = _clean_source_fields(source_fields)
-    source_data = _clean_source_data(source_data)
-    dsl_definitions = _clean_dsl_definitions(dsl_definitions)
-    mappings = _clean_mappings(mappings, model_fields, source_fields)
+def _execute_llm_batches(mapped_targets, model_fields, source_fields, source_data, mappings, dsl_definitions, model_meta, chat_fn, max_retries=3):
+    """执行LLM批次调用，支持重试机制
 
-    if not model_fields or not source_fields:
-        return {
-            "suggestions": {},
-            "fallbackApplied": False,
-            "fallbackReason": ""
-        }
-
-    fallback_suggestions = _build_fallback_suggestions(model_fields, mappings, source_data, dsl_definitions)
-
-    mapped_targets = [item["fieldName"] for item in model_fields if mappings.get(item["fieldName"])]
-    if not mapped_targets:
-        return {
-            "suggestions": {},
-            "fallbackApplied": False,
-            "fallbackReason": ""
-        }
-
+    Args:
+        max_retries: 最大重试次数，默认3次
+    """
     batch_size = _resolve_mapping_batch_size()
     batches = list(_chunk_by_size(mapped_targets, batch_size))
     logger.info(
-        "generate_process_suggestions batching, target_count:%s, batch_size:%s, batch_count:%s",
-        len(mapped_targets),
-        batch_size,
-        len(batches)
+        "generate_process_suggestions batching, target_count:%s, batch_size:%s, batch_count:%s, max_retries:%s",
+        len(mapped_targets), batch_size, len(batches), max_retries
     )
 
     llm_suggestions = {}
     llm_errors = []
-    chat_fn = llm_chat_fn or chat_completion
 
     for batch_index, batch_targets in enumerate(batches, start=1):
         batch_context = _build_batch_context(batch_targets, model_fields, source_fields, source_data, mappings)
@@ -774,20 +774,104 @@ def generate_process_suggestions(model_detail, source_fields, source_data, mappi
             "dslDefinitions": dsl_definitions
         }
 
-        try:
-            messages = build_messages(payload)
-            llm_text = chat_fn(messages)
-            llm_payload = extract_json_dict(llm_text)
-            batch_suggestions = _sanitize_suggestions(llm_payload, batch_model_fields, batch_mappings, dsl_definitions)
-            for field_name, suggestion in batch_suggestions.items():
-                llm_suggestions[field_name] = suggestion
-        except Exception as exc:  # noqa: BLE001
-            logger.error("generate_process_suggestions llm failed at batch %s: %s", batch_index, exc)
-            llm_errors.append("batch{}_{}".format(batch_index, exc.__class__.__name__))
+        batch_success = False
+        last_error = None
+        for retry in range(max_retries):
+            try:
+                messages = build_messages(payload)
+                llm_text = chat_fn(messages)
+                llm_payload = extract_json_dict(llm_text)
+                batch_suggestions = _sanitize_suggestions(llm_payload, batch_model_fields, batch_mappings, dsl_definitions)
+                llm_suggestions.update(batch_suggestions)
+                batch_success = True
+                if retry > 0:
+                    logger.info("generate_process_suggestions batch %s succeeded after %d retries", batch_index, retry)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if retry < max_retries - 1:
+                    logger.warning("generate_process_suggestions batch %s failed (retry %d/%d): %s",
+                                   batch_index, retry + 1, max_retries, exc)
+                else:
+                    logger.error("generate_process_suggestions batch %s failed after %d retries: %s",
+                                 batch_index, max_retries, exc)
 
-    llm_error = ""
-    if llm_errors:
-        llm_error = "llm_failed:{}".format("|".join(_unique_keep_order(llm_errors)))
+        if not batch_success:
+            llm_errors.append("batch{}_{}".format(batch_index, last_error.__class__.__name__ if last_error else "Unknown"))
+
+    return llm_suggestions, llm_errors
+
+
+def _filter_time_space_only(model_fields, source_fields, source_data, mappings):
+    """过滤数据，只保留fieldBusinessType为time或space的字段
+
+    这样可以大大缩减需要LLM处理的数据量。
+    """
+    # 筛选fieldBusinessType为time或space的字段
+    allowed_business_types = {"time", "space"}
+    target_fields = [
+        f for f in model_fields
+        if _to_text(f.get("businessType")).lower() in allowed_business_types
+    ]
+
+    if not target_fields:
+        logger.warning("filter_time_space_only: no time/space fields found, keeping all fields")
+        return model_fields, source_fields, source_data, mappings
+
+    target_field_names = {f["fieldName"] for f in target_fields}
+
+    # 过滤mappings，只保留目标字段中的映射
+    filtered_mappings = {
+        k: v for k, v in mappings.items() if k in target_field_names
+    }
+
+    # 收集被使用的source字段key
+    used_source_keys = set()
+    for source_keys in filtered_mappings.values():
+        used_source_keys.update(source_keys)
+
+    # 过滤source_fields
+    filtered_source_fields = [
+        s for s in source_fields if s.get("fieldKey") in used_source_keys
+    ]
+
+    # 过滤source_data，只保留被使用的列
+    filtered_source_data = {}
+    for table_name, rows in source_data.items():
+        if not rows:
+            continue
+        # 收集该表中被使用的列
+        used_columns = set()
+        for source_field in filtered_source_fields:
+            if source_field.get("sourceTable") == table_name:
+                key = source_field.get("fieldKey", "")
+                _, col_name = _parse_source_key(key)
+                if col_name:
+                    used_columns.add(col_name)
+
+        if used_columns:
+            filtered_rows = []
+            for row in rows:
+                if isinstance(row, dict):
+                    filtered_row = {col: row.get(col) for col in used_columns if col in row}
+                    if filtered_row:
+                        filtered_rows.append(filtered_row)
+            if filtered_rows:
+                filtered_source_data[table_name] = filtered_rows
+
+    logger.info(
+        "filter_time_space_only: original %d fields -> filtered %d fields, "
+        "original %d source_fields -> filtered %d source_fields",
+        len(model_fields), len(target_fields),
+        len(source_fields), len(filtered_source_fields)
+    )
+
+    return target_fields, filtered_source_fields, filtered_source_data, filtered_mappings
+
+
+def _merge_suggestions(llm_suggestions, fallback_suggestions, model_fields, llm_errors):
+    """合并LLM建议和fallback建议"""
+    llm_error = "llm_failed:{}".format("|".join(_unique_keep_order(llm_errors))) if llm_errors else ""
 
     if llm_suggestions:
         merged = {}
@@ -824,3 +908,36 @@ def generate_process_suggestions(model_detail, source_fields, source_data, mappi
         "fallbackApplied": bool(llm_error),
         "fallbackReason": llm_error
     }
+
+
+def generate_process_suggestions(model_detail, source_fields, source_data, mappings, dsl_definitions, llm_chat_fn=None):
+    """Return dict with suggestions and fallback metadata."""
+    model_meta, model_fields = _clean_model_detail(model_detail)
+    source_fields = _clean_source_fields(source_fields)
+    source_data = _clean_source_data(source_data)
+    dsl_definitions = _clean_dsl_definitions(dsl_definitions)
+    mappings = _clean_mappings(mappings, model_fields, source_fields)
+
+    if not model_fields or not source_fields:
+        return {"suggestions": {}, "fallbackApplied": False, "fallbackReason": ""}
+
+    # 预处理：只保留time和space类型的字段，减少LLM处理的数据量
+    model_fields, source_fields, source_data, mappings = _filter_time_space_only(
+        model_fields, source_fields, source_data, mappings
+    )
+
+    if not model_fields or not source_fields:
+        return {"suggestions": {}, "fallbackApplied": False, "fallbackReason": ""}
+
+    fallback_suggestions = _build_fallback_suggestions(model_fields, mappings, source_data, dsl_definitions)
+
+    mapped_targets = [item["fieldName"] for item in model_fields if mappings.get(item["fieldName"])]
+    if not mapped_targets:
+        return {"suggestions": {}, "fallbackApplied": False, "fallbackReason": ""}
+
+    chat_fn = llm_chat_fn or chat_completion
+    llm_suggestions, llm_errors = _execute_llm_batches(
+        mapped_targets, model_fields, source_fields, source_data, mappings, dsl_definitions, model_meta, chat_fn
+    )
+
+    return _merge_suggestions(llm_suggestions, fallback_suggestions, model_fields, llm_errors)
