@@ -1,7 +1,7 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # coding=utf-8
 #  Copyright (c) Huawei Technologies Co., Ltd. 2020-2026. All rights reserved.
-"""LLM client for process suggestion generation."""
+
 
 import json
 
@@ -10,10 +10,15 @@ from utils.log_utils import LogUtils
 
 logger = LogUtils.get_logger('data_smart_process_call_llm')
 
-DEFAULT_MODEL = "qwen-s-pro"
+DEFAULT_MODEL = "qwen3.5"
 
 SYSTEM_PROMPT = """
 你是数据处理规则生成助手。你需要基于输入数据，为目标字段输出“可直接应用”的处理建议。
+输入数据及任务解释：
+1) fieldList是定义的项目模型，包含了各个字段的类型、格式和业务类型等定义
+2) sourceFields是原始数据的字段解释，sourceData是真实上传的原始数据
+3) mappings是原始数据字段到项目模型的映射关系
+4) 这里的任务是将原始数据处理成项目模型中规定的数据的样子，生成需要的算子配置
 
 必须遵守：
 1) 只能使用输入中的 modelDetail.fieldList（以及归一化后的 modelFields）/sourceFields/mappings/sourceData，不得臆造字段。
@@ -38,8 +43,14 @@ SYSTEM_PROMPT = """
    - 先推断源字段 originType（源格式模板）和目标字段 targetFormat（模型字段格式）。
    - 当 originType 与 targetFormat 不一致时，才建议使用 format_datetime。
    - format_datetime 时，必须输出 originType（源格式模板字符串：YYYY/MM/DD/hh/mm/ss + 原分隔符）；非时间字段或多源映射字段不要输出 originType。
-7) 不确定时可不返回该字段建议，不要猜测。
-8) 若某算子缺少必填参数，不要输出该算子。
+7) 只需要处理时间格式转换：
+     - 只有当源数据的时间格式与目标字段的 dataFormat 不一致时，才建议使用 format_datetime
+     - 禁止生成以下转换：
+       * 数值类型转字符串（如 float -> string）
+       * 字符串转数值（如 string -> int/float）
+       * 不要用set_value进行数据格式的转换！！！
+8) 不确定时可不返回该字段建议，不要猜测。
+9) 若某算子缺少必填参数，不要输出该算子。
 
 算子说明（以 dslDefinitions 定义为准，下面仅作参考）：
 A. filter
@@ -57,9 +68,11 @@ B. transform（只允许以下 type）
 C. sort
 - {"order":"asc|desc"}
 
-业务规则：
-- 当 modelType 为 counter/kpi 且 involveCalc=true，若发现非数值异常值，建议替换为 "0"。
-- 当 modelType 为 counter/kpi 且 involveCalc=false，若发现非数值异常值，建议替换为空字符串 ""。
+需要严格遵守的业务规则：
+- 当字段业务类型为time时，先根据对应的原始数据推断字段的原始时间格式originType，再看是否与模型中要求的格式相同，如果不同，则需要调用format_datetime算子
+- 字段类型如果不一致不需要进行转换修改，比如原始数据是int，目标字段要求是string，不需要转换格式
+- 不要编造处理方法
+
 """.strip()
 
 
