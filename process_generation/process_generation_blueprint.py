@@ -17,9 +17,10 @@ psf_log = PsfLog.psf_log
 
 @bp.route("/v1/dataSmart/generateProcessConfig", methods=['POST'])
 @psf_log(object_type="data", operation_name="generateProcessConfig", module_name="data_smart",
-         param_name_list=["code", "modelName", "businessModelType", "involveCalc", "fieldList", "sourceFields", "sourceData", "mappings", "dslDefinitions"])
+         param_name_list=["code", "modelName", "businessModelType", "involveCalc", "fieldList",
+                          "sourceFields", "sourceData", "mappings", "dslDefinitions"])
 def generate_process_config():
-    """Generate process suggestions for step-3 data processing."""
+    """自动配置生成接口：调用大模型完成字段数据处理配置生成"""
     try:
         data = request.get_json(silent=True)
         data = data if isinstance(data, dict) else {}
