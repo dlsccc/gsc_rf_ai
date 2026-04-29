@@ -15,6 +15,8 @@ FILTER_OPERATORS = {
 }
 TIME_TRANSFORM_INPUT_TYPES = {"format_datetime", "extract_year", "extract_month", "extract_time", "format_time"}
 TRANSFORM_TYPES = {"format_datetime", "calc_week", "calc_weekday", "set_value", "concat", "replace"}
+QOS_INDICATOR_FIELD_NAMES = {"nr 5g qos indicator"}
+FIELD_NAME_5QI_PATTERN = re.compile(r"5QI(\d+)", re.IGNORECASE)
 
 DEFAULT_MAPPING_BATCH_SIZE = 50
 
@@ -409,6 +411,34 @@ def _collect_values_by_target(field_name, mappings, source_data):
     return values
 
 
+def _build_source_field_map(source_fields):
+    return {_to_text(item.get("fieldKey")): item for item in source_fields if isinstance(item, dict)}
+
+
+def _find_qos_indicator_mapping(mapped_keys, source_field_map):
+    for source_key in mapped_keys:
+        source_field = source_field_map.get(_to_text(source_key), {})
+        field_name = _to_text(source_field.get("fieldName")).lower()
+        if field_name in QOS_INDICATOR_FIELD_NAMES:
+            return _to_text(source_key)
+    return ""
+
+
+def _find_same_name_without_5qi_number(field_name, mapped_keys, source_field_map):
+    source_field_name = FIELD_NAME_5QI_PATTERN.sub("5QI", _to_text(field_name))
+    if not source_field_name or source_field_name == _to_text(field_name):
+        return ""
+
+    normalized_target = source_field_name.lower()
+    for source_key in mapped_keys:
+        source_field = source_field_map.get(_to_text(source_key), {})
+        candidate_name = _to_text(source_field.get("fieldName"))
+        _, candidate_column = _parse_source_key(_to_text(source_key))
+        if candidate_name.lower() == normalized_target or candidate_column.lower() == normalized_target:
+            return _to_text(source_key)
+    return ""
+
+
 def _detect_origin_type_from_mapped_source(field_name, mappings, source_data):
     mapped_keys = mappings.get(field_name, [])
     if len(mapped_keys) != 1:
@@ -541,6 +571,9 @@ def _sanitize_transform_step(raw_step, allow_origin_type=False, target_format=""
 
     item = {
         "type": transform_type,
+        "conditionSourceKey": _to_text(raw_step.get("conditionSourceKey")),
+        "actionSourceKey": _to_text(raw_step.get("actionSourceKey")),
+        "actionMode": _to_text(raw_step.get("actionMode")),
         "delimiter": raw_step.get("delimiter", ""),
         "fixedValue": raw_step.get("fixedValue", ""),
         "search": raw_step.get("search", ""),
@@ -593,6 +626,9 @@ def _sanitize_transform(field_name, raw_transform, mappings, model_field_map, al
             sanitized_rules.append({
                 "operator": operator,
                 "value": rule.get("value", ""),
+                "conditionSourceKey": step.get("conditionSourceKey", ""),
+                "actionSourceKey": step.get("actionSourceKey", ""),
+                "actionMode": step.get("actionMode", ""),
                 "type": step["type"],
                 "delimiter": step.get("delimiter", ""),
                 "fixedValue": step.get("fixedValue", ""),
@@ -715,6 +751,66 @@ def _build_time_fallback(field, field_name, mapped_keys, mappings, source_data, 
     }
 
 
+def _build_5qi_conditional_suggestions(model_fields, source_fields, mappings):
+    source_field_map = _build_source_field_map(source_fields)
+    suggestions = {}
+
+    for field in model_fields:
+        field_name = _to_text(field.get("fieldName"))
+        if not field_name:
+            continue
+
+        business_type = _to_text(field.get("businessType")).lower()
+        model_type = _to_text(field.get("modelType")).lower()
+        if business_type != "metric" and model_type not in {"counter", "kpi"}:
+            continue
+
+        match = FIELD_NAME_5QI_PATTERN.search(field_name)
+        if not match:
+            continue
+
+        mapped_keys = mappings.get(field_name, [])
+        if len(mapped_keys) < 2:
+            continue
+
+        qos_indicator_key = _find_qos_indicator_mapping(mapped_keys, source_field_map)
+        value_source_key = _find_same_name_without_5qi_number(field_name, mapped_keys, source_field_map)
+        if not qos_indicator_key or not value_source_key:
+            continue
+
+        qos_index = match.group(1)
+        suggestions[field_name] = {
+            "needAttention": True,
+            "hint": "检测到 5QI 指标字段，建议按 NR 5G QoS Indicator 的值做条件转换。",
+            "operations": {
+                "transform": {
+                    "rules": [
+                        {
+                            "operator": "equals",
+                            "value": qos_index,
+                            "conditionSourceKey": qos_indicator_key,
+                            "actionSourceKey": value_source_key,
+                            "actionMode": "keep_source",
+                            "type": "set_value",
+                            "fixedValue": ""
+                        },
+                        {
+                            "operator": "not_equals",
+                            "value": qos_index,
+                            "conditionSourceKey": qos_indicator_key,
+                            "actionSourceKey": value_source_key,
+                            "actionMode": "transform",
+                            "type": "set_value",
+                            "fixedValue": ""
+                        }
+                    ]
+                }
+            }
+        }
+
+    return suggestions
+
+
 def _build_fallback_suggestions(model_fields, mappings, source_data, dsl_definitions):
     """构建规则建议（仅时间格式化规则）"""
     allowed_transform_types = _get_allowed_transform_types(dsl_definitions)
@@ -802,21 +898,20 @@ def _execute_llm_batches(mapped_targets, model_fields, source_fields, source_dat
     return llm_suggestions, llm_errors
 
 
-def _filter_time_space_only(model_fields, source_fields, source_data, mappings):
+def _filter_non_metric_fields(model_fields, source_fields, source_data, mappings):
     """过滤数据，只保留fieldBusinessType为time或space的字段
 
     这样可以大大缩减需要LLM处理的数据量。
     """
     # 筛选fieldBusinessType为time或space的字段
-    allowed_business_types = {"time", "space"}
     target_fields = [
         f for f in model_fields
-        if _to_text(f.get("businessType")).lower() in allowed_business_types
+        if _to_text(f.get("businessType")).lower() != "metric"
     ]
 
     if not target_fields:
-        logger.warning("filter_time_space_only: no time/space fields found, keeping all fields")
-        return model_fields, source_fields, source_data, mappings
+        logger.info("filter_non_metric_fields: no non-metric fields found")
+        return [], [], {}, {}
 
     target_field_names = {f["fieldName"] for f in target_fields}
 
@@ -860,7 +955,7 @@ def _filter_time_space_only(model_fields, source_fields, source_data, mappings):
                 filtered_source_data[table_name] = filtered_rows
 
     logger.info(
-        "filter_time_space_only: original %d fields -> filtered %d fields, "
+        "filter_non_metric_fields: original %d fields -> filtered %d fields, "
         "original %d source_fields -> filtered %d source_fields",
         len(model_fields), len(target_fields),
         len(source_fields), len(filtered_source_fields)
@@ -910,6 +1005,29 @@ def _merge_suggestions(llm_suggestions, fallback_suggestions, model_fields, llm_
     }
 
 
+def _merge_special_suggestions(base_result, special_suggestions, all_model_fields):
+    if not special_suggestions:
+        return base_result
+
+    merged = {}
+    base_suggestions = base_result.get("suggestions", {})
+
+    for item in all_model_fields:
+        field_name = item["fieldName"]
+        if field_name in special_suggestions:
+            merged[field_name] = special_suggestions[field_name]
+        elif field_name in base_suggestions:
+            merged[field_name] = base_suggestions[field_name]
+
+    for field_name, suggestion in base_suggestions.items():
+        if field_name not in merged:
+            merged[field_name] = suggestion
+
+    result = dict(base_result)
+    result["suggestions"] = merged
+    return result
+
+
 def generate_process_suggestions(model_detail, source_fields, source_data, mappings, dsl_definitions, llm_chat_fn=None):
     """Return dict with suggestions and fallback metadata."""
     model_meta, model_fields = _clean_model_detail(model_detail)
@@ -921,23 +1039,35 @@ def generate_process_suggestions(model_detail, source_fields, source_data, mappi
     if not model_fields or not source_fields:
         return {"suggestions": {}, "fallbackApplied": False, "fallbackReason": ""}
 
-    # 预处理：只保留time和space类型的字段，减少LLM处理的数据量
-    model_fields, source_fields, source_data, mappings = _filter_time_space_only(
+    all_model_fields = model_fields
+    special_suggestions = _build_5qi_conditional_suggestions(all_model_fields, source_fields, mappings)
+
+    # ?????????? LLM??????? 5QI ????
+    model_fields, source_fields, source_data, mappings = _filter_non_metric_fields(
         model_fields, source_fields, source_data, mappings
     )
 
     if not model_fields or not source_fields:
-        return {"suggestions": {}, "fallbackApplied": False, "fallbackReason": ""}
+        return _merge_special_suggestions(
+            {"suggestions": {}, "fallbackApplied": False, "fallbackReason": ""},
+            special_suggestions,
+            all_model_fields
+        )
 
     fallback_suggestions = _build_fallback_suggestions(model_fields, mappings, source_data, dsl_definitions)
 
     mapped_targets = [item["fieldName"] for item in model_fields if mappings.get(item["fieldName"])]
     if not mapped_targets:
-        return {"suggestions": {}, "fallbackApplied": False, "fallbackReason": ""}
+        return _merge_special_suggestions(
+            {"suggestions": fallback_suggestions, "fallbackApplied": bool(fallback_suggestions), "fallbackReason": ""},
+            special_suggestions,
+            all_model_fields
+        )
 
     chat_fn = llm_chat_fn or chat_completion
     llm_suggestions, llm_errors = _execute_llm_batches(
         mapped_targets, model_fields, source_fields, source_data, mappings, dsl_definitions, model_meta, chat_fn
     )
 
-    return _merge_suggestions(llm_suggestions, fallback_suggestions, model_fields, llm_errors)
+    result = _merge_suggestions(llm_suggestions, fallback_suggestions, model_fields, llm_errors)
+    return _merge_special_suggestions(result, special_suggestions, all_model_fields)
