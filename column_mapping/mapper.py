@@ -14,6 +14,8 @@ logger = LogUtils.get_logger('mapper')
 LOCATION_TARGET_KEYWORDS = ("location", "coordinate", "position", "geo", "坐标", "经纬", "位置")
 LNG_CANDIDATES = {"lng", "lon", "longitude", "long", "经度"}
 LAT_CANDIDATES = {"lat", "latitude", "纬度"}
+QOS_INDICATOR_FIELD_NAMES = {"nr5gqosindicator"}
+FIELD_NAME_5QI_PATTERN = re.compile(r"5QI(\d+)", re.IGNORECASE)
 
 
 def _to_text(value):
@@ -53,6 +55,7 @@ def _clean_model_fields(model_fields):
                 "fieldName": field_name,
                 "fieldType": _to_text(item.get("fieldType")),
                 "fieldDesc": _to_text(item.get("fieldDesc")),
+                "fieldBusinessType": _to_text(item.get("fieldBusinessType") or item.get("businessType")).lower(),
             }
         )
     return result
@@ -143,6 +146,35 @@ def _find_lon_lat(source_fields):
     return []
 
 
+def _find_5qi_special_mapping(model_item, source_fields):
+    target_name = _to_text(model_item.get("fieldName"))
+    business_type = _to_text(model_item.get("fieldBusinessType")).lower()
+    if business_type != "metric":
+        return []
+
+    match = FIELD_NAME_5QI_PATTERN.search(target_name)
+    if not match:
+        return []
+
+    target_without_number = FIELD_NAME_5QI_PATTERN.sub("5QI", target_name)
+    normalized_without_number = _normalize_name(target_without_number)
+    qos_indicator_key = ""
+    base_field_key = ""
+
+    for item in source_fields:
+        normalized_name = _normalize_name(item["fieldName"])
+        if not qos_indicator_key and normalized_name in QOS_INDICATOR_FIELD_NAMES:
+            qos_indicator_key = item["fieldKey"]
+        if not base_field_key and normalized_name == normalized_without_number:
+            base_field_key = item["fieldKey"]
+        if qos_indicator_key and base_field_key:
+            break
+
+    if qos_indicator_key and base_field_key:
+        return [qos_indicator_key, base_field_key]
+    return []
+
+
 def _rule_fallback(model_fields, source_fields):
     by_name = {}
     by_normalized_name = {}
@@ -156,6 +188,10 @@ def _rule_fallback(model_fields, source_fields):
     mappings = {}
     for item in model_fields:
         target_name = item["fieldName"]
+        special_mapping = _find_5qi_special_mapping(item, source_fields)
+        if special_mapping:
+            mappings[target_name] = special_mapping
+            continue
         if target_name in by_name:
             mappings[target_name] = _unique_keep_order(by_name[target_name])
             continue
@@ -211,6 +247,11 @@ def _rule_match_by_name_and_desc(model_fields, source_fields):
     for model_item in model_fields:
         target_name = model_item["fieldName"]
         target_desc = _normalize_name(model_item.get("fieldDesc", ""))
+
+        special_mapping = _find_5qi_special_mapping(model_item, source_fields)
+        if special_mapping:
+            mappings[target_name] = special_mapping
+            continue
 
         # 1. 精确匹配字段名
         if target_name in source_by_name:
