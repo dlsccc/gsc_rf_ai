@@ -27,6 +27,6 @@ def execute_auto_map_fields(data):
     model_fields = payload.get("modelFields", [])
     source_fields = payload.get("sourceFields", [])
 
-    result = run_auto_map_fields(model_fields=model_fields, source_fields=source_fields)
+    # 默认使用规则匹配，不调用LLM
+    result = run_auto_map_fields(model_fields=model_fields, source_fields=source_fields, use_llm=False)
     return _build_response(result)
-
