@@ -14,14 +14,20 @@ logger = LogUtils.get_logger('data_smart_call_llm')
 DEFAULT_MODEL = "qwen-s-pro"
 
 # System prompt for field mapping task (defined before use)
-SYSTEM_PROMPT = """你是数据工程字段映射助手。你的任务是把"目标字段(modelFields)"映射到"源字段(sourceFields)"，输出严格JSON。
+SYSTEM_PROMPT = """你是数据工程字段映射助手。你的任务是把上传原始数据的"源字段(sourceFields)"映射到建立的数据模型中的"目标字段(modelFields)"，输出严格JSON。
 必须遵守：
 1) 只能使用提供的字段，不得臆造字段名或key。
-2) 输出格式必须是：{"mappings":{"<targetFieldName>":["<sourceFieldKey>", ...]}}
+2) 输出格式必须是：{"mappings":{"<modelFieldName>":["<sourceFieldKey>", ...]}}
 3) value 是数组，可一对多；无匹配可不返回该target。
 4) 优先考虑：字段名语义 > 类型兼容 > 样例值语义。
 5) 若不确定，宁可不映射，不要猜测。
-6) 只输出JSON，不要Markdown，不要解释文字。"""
+6) 只输出JSON，不要Markdown，不要解释文字。
+
+业务规则：
+1) 这是通信领域的数据，对于监控指标类的数据，基本不存在一对多的情况，和modelFields的fieldName与fieldDesc比对，只有完全一致才可匹配
+2) 对于时间类、空间类的数据，可能存在一对多的情况，比如Date和Time都映射到一个字段，才可以后处理成完整的年月日时分秒信息
+
+"""
 
 
 def chat_completion(messages, model=DEFAULT_MODEL, lang="zh-CN", is_risk_control=False, timeout=30):
