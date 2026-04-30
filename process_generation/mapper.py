@@ -477,15 +477,24 @@ def _infer_origin_type_from_value(value):
 
     patterns = [
         (r"^\d{4}-\d{2}-\d{2}$", "YYYY-MM-DD"),
+        (r"^\d{4}-\d{1,2}-\d{1,2}$", "YYYY-MM-DD"),
         (r"^\d{4}/\d{2}/\d{2}$", "YYYY/MM/DD"),
+        (r"^\d{4}/\d{1,2}/\d{1,2}$", "YYYY/MM/DD"),
         (r"^\d{4}\.\d{2}\.\d{2}$", "YYYY.MM.DD"),
-        (r"^\d{4}年\d{1,2}月\d{1,2}日$", "YYYY年MM月DD日"),
+        (r"^\d{4}\.\d{1,2}\.\d{1,2}$", "YYYY.MM.DD"),
+        (r"^\d{4}?\d{1,2}?\d{1,2}?$", "YYYY??M??D??"),
         (r"^\d{4}-\d{2}$", "YYYY-MM"),
+        (r"^\d{4}-\d{1,2}$", "YYYY-MM"),
         (r"^\d{4}/\d{2}$", "YYYY/MM"),
+        (r"^\d{4}/\d{1,2}$", "YYYY/MM"),
         (r"^\d{2}:\d{2}:\d{2}$", "hh:mm:ss"),
+        (r"^\d{1,2}:\d{1,2}:\d{1,2}$", "hh:mm:ss"),
         (r"^\d{2}:\d{2}$", "hh:mm"),
+        (r"^\d{1,2}:\d{1,2}$", "hh:mm"),
         (r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$", "YYYY-MM-DD hh:mm:ss"),
-        (r"^\d{4}/\d{2}/\d{2}[ T]\d{2}:\d{2}:\d{2}$", "YYYY/MM/DD hh:mm:ss")
+        (r"^\d{4}-\d{1,2}-\d{1,2}[ T]\d{1,2}:\d{1,2}:\d{1,2}$", "YYYY-MM-DD hh:mm:ss"),
+        (r"^\d{4}/\d{2}/\d{2}[ T]\d{2}:\d{2}:\d{2}$", "YYYY/MM/DD hh:mm:ss"),
+        (r"^\d{4}/\d{1,2}/\d{1,2}[ T]\d{1,2}:\d{1,2}:\d{1,2}$", "YYYY/MM/DD hh:mm:ss")
     ]
 
     for pattern, template in patterns:
@@ -493,8 +502,6 @@ def _infer_origin_type_from_value(value):
             return template
 
     return ""
-
-
 def _normalize_time_template(template):
     return _to_text(template).replace(" ", "").upper()
 

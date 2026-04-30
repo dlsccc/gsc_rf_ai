@@ -59,6 +59,7 @@ A. filter
 
 B. transform（只允许以下 type）
 - format_datetime: 只输出 originType（例如 YYYY-MM-DD / YYYY/MM/DD / hh:mm:ss）
+- custom originType is allowed when the source time format is not covered by preset options; for example, source sample `2026/3/2` should infer `YYYY/MM/DD`.
 - calc_week
 - calc_weekday
 - set_value（fixedValue）
