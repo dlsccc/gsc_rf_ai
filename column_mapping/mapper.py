@@ -148,15 +148,20 @@ def _find_lon_lat(source_fields):
 
 def _find_5qi_special_mapping(model_item, source_fields):
     target_name = _to_text(model_item.get("fieldName"))
+    target_desc = _to_text(model_item.get("fieldDesc"))
     business_type = _to_text(model_item.get("fieldBusinessType")).lower()
     if business_type != "metric":
         return []
 
     match = FIELD_NAME_5QI_PATTERN.search(target_name)
+    match_source_text = target_name
+    if not match and target_desc:
+        match = FIELD_NAME_5QI_PATTERN.search(target_desc)
+        match_source_text = target_desc
     if not match:
         return []
 
-    target_without_number = FIELD_NAME_5QI_PATTERN.sub("5QI", target_name)
+    target_without_number = FIELD_NAME_5QI_PATTERN.sub("5QI", match_source_text)
     normalized_without_number = _normalize_name(target_without_number)
     qos_indicator_key = ""
     base_field_key = ""
