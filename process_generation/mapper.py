@@ -20,7 +20,7 @@ FIELD_NAME_5QI_PATTERN = re.compile(r"5QI(\d+)", re.IGNORECASE)
 
 DEFAULT_MAPPING_BATCH_SIZE = 50
 
-TIME_TOKEN_PATTERN = re.compile(r"(YYYY|MM|DD|hh|mm|ss)")
+TIME_TOKEN_PATTERN = re.compile(r"(yyyy|MM|dd|HH|mm|ss|YYYY|DD|hh)")
 TIME_KEYWORDS = (
     "time", "date", "year", "month", "day", "week", "hour", "minute", "second",
     "时间", "日期", "年", "月", "日", "周", "星期", "时", "分", "秒"
@@ -476,25 +476,24 @@ def _infer_origin_type_from_value(value):
         return ""
 
     patterns = [
-        (r"^\d{4}-\d{2}-\d{2}$", "YYYY-MM-DD"),
-        (r"^\d{4}-\d{1,2}-\d{1,2}$", "YYYY-MM-DD"),
-        (r"^\d{4}/\d{2}/\d{2}$", "YYYY/MM/DD"),
-        (r"^\d{4}/\d{1,2}/\d{1,2}$", "YYYY/MM/DD"),
-        (r"^\d{4}\.\d{2}\.\d{2}$", "YYYY.MM.DD"),
-        (r"^\d{4}\.\d{1,2}\.\d{1,2}$", "YYYY.MM.DD"),
-        (r"^\d{4}?\d{1,2}?\d{1,2}?$", "YYYY??M??D??"),
-        (r"^\d{4}-\d{2}$", "YYYY-MM"),
-        (r"^\d{4}-\d{1,2}$", "YYYY-MM"),
-        (r"^\d{4}/\d{2}$", "YYYY/MM"),
-        (r"^\d{4}/\d{1,2}$", "YYYY/MM"),
-        (r"^\d{2}:\d{2}:\d{2}$", "hh:mm:ss"),
-        (r"^\d{1,2}:\d{1,2}:\d{1,2}$", "hh:mm:ss"),
-        (r"^\d{2}:\d{2}$", "hh:mm"),
-        (r"^\d{1,2}:\d{1,2}$", "hh:mm"),
-        (r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$", "YYYY-MM-DD hh:mm:ss"),
-        (r"^\d{4}-\d{1,2}-\d{1,2}[ T]\d{1,2}:\d{1,2}:\d{1,2}$", "YYYY-MM-DD hh:mm:ss"),
-        (r"^\d{4}/\d{2}/\d{2}[ T]\d{2}:\d{2}:\d{2}$", "YYYY/MM/DD hh:mm:ss"),
-        (r"^\d{4}/\d{1,2}/\d{1,2}[ T]\d{1,2}:\d{1,2}:\d{1,2}$", "YYYY/MM/DD hh:mm:ss")
+        (r"^\d{4}-\d{2}-\d{2}$", "yyyy-MM-dd"),
+        (r"^\d{4}-\d{1,2}-\d{1,2}$", "yyyy-MM-dd"),
+        (r"^\d{4}/\d{2}/\d{2}$", "yyyy/MM/dd"),
+        (r"^\d{4}/\d{1,2}/\d{1,2}$", "yyyy/MM/dd"),
+        (r"^\d{4}\.\d{2}\.\d{2}$", "yyyy.MM.dd"),
+        (r"^\d{4}\.\d{1,2}\.\d{1,2}$", "yyyy.MM.dd"),
+        (r"^\d{4}-\d{2}$", "yyyy-MM"),
+        (r"^\d{4}-\d{1,2}$", "yyyy-MM"),
+        (r"^\d{4}/\d{2}$", "yyyy/MM"),
+        (r"^\d{4}/\d{1,2}$", "yyyy/MM"),
+        (r"^\d{2}:\d{2}:\d{2}$", "HH:mm:ss"),
+        (r"^\d{1,2}:\d{1,2}:\d{1,2}$", "HH:mm:ss"),
+        (r"^\d{2}:\d{2}$", "HH:mm"),
+        (r"^\d{1,2}:\d{1,2}$", "HH:mm"),
+        (r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$", "yyyy-MM-dd HH:mm:ss"),
+        (r"^\d{4}-\d{1,2}-\d{1,2}[ T]\d{1,2}:\d{1,2}:\d{1,2}$", "yyyy-MM-dd HH:mm:ss"),
+        (r"^\d{4}/\d{2}/\d{2}[ T]\d{2}:\d{2}:\d{2}$", "yyyy/MM/dd HH:mm:ss"),
+        (r"^\d{4}/\d{1,2}/\d{1,2}[ T]\d{1,2}:\d{1,2}:\d{1,2}$", "yyyy/MM/dd HH:mm:ss")
     ]
 
     for pattern, template in patterns:

@@ -42,7 +42,7 @@ SYSTEM_PROMPT = """
 6) 时间转换规则：
    - 先推断源字段 originType（源格式模板）和目标字段 targetFormat（模型字段格式）。
    - 当 originType 与 targetFormat 不一致时，才建议使用 format_datetime。
-   - format_datetime 时，必须输出 originType（源格式模板字符串：YYYY/MM/DD/hh/mm/ss + 原分隔符）；非时间字段或多源映射字段不要输出 originType。
+   - format_datetime 时，必须输出 originType（源格式模板字符串：yyyy/MM/dd/HH/mm/ss + 原分隔符）；非时间字段或多源映射字段不要输出 originType。
 7) 只需要处理时间格式转换：
      - 只有当源数据的时间格式与目标字段的 dataFormat 不一致时，才建议使用 format_datetime
      - 禁止生成以下转换：
@@ -58,8 +58,8 @@ A. filter
 - compound: {"mode":"compound","logic":"AND|OR","conditions":[{"operator":"...","value":"..."}]}
 
 B. transform（只允许以下 type）
-- format_datetime: 只输出 originType（例如 YYYY-MM-DD / YYYY/MM/DD / hh:mm:ss）
-- custom originType is allowed when the source time format is not covered by preset options; for example, source sample `2026/3/2` should infer `YYYY/MM/DD`.
+- format_datetime: 只输出 originType（例如 yyyy-MM-dd / yyyy/MM/dd / HH:mm:ss）
+- custom originType is allowed when the source time format is not covered by preset options; for example, source sample `2026/3/2` should infer `yyyy/MM/dd`.
 - calc_week
 - calc_weekday
 - set_value（fixedValue）
